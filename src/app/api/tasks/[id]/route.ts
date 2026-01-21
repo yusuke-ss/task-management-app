@@ -1,37 +1,51 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { getTaskRepository } from "@/lib/patterns/repository/TaskRepository";
+import {
+  GetTaskByIdCommand,
+  UpdateTaskCommand,
+  DeleteTaskCommand,
+  CommandInvoker,
+} from "@/lib/patterns/command/TaskCommands";
+import { TaskValidators } from "@/lib/patterns/helpers/TaskValidators";
+import { ResponseFactory } from "@/lib/patterns/decorator/ResponseDecorator";
+
+/**
+ * 個別タスク操作API
+ * GoFデザインパターンを適用:
+ * - Repository Pattern: データアクセスの抽象化
+ * - Command Pattern: 操作のカプセル化
+ * - Singleton Pattern: リポジトリとインボーカーの管理
+ * - Factory Pattern: レスポンス生成
+ * - Chain of Responsibility: バリデーションチェーン
+ */
 
 type Params = Promise<{ id: string }>;
+
+const repository = getTaskRepository();
+const invoker = new CommandInvoker();
 
 export async function GET(request: Request, { params }: { params: Params }) {
   try {
     const { id } = await params;
     const taskId = parseInt(id, 10);
 
-    if (isNaN(taskId)) {
-      return NextResponse.json(
-        { error: "無効なタスクIDです" },
-        { status: 400 }
-      );
+    // バリデーション
+    const validationResult = TaskValidators.validateTaskId(taskId);
+    if (!validationResult.isValid) {
+      return ResponseFactory.badRequest(validationResult.error || "無効なタスクIDです");
     }
 
-    const task = await prisma.task.findUnique({
-      where: { id: taskId },
-    });
+    // Command Pattern: タスク取得コマンド
+    const command = new GetTaskByIdCommand(repository, taskId);
+    const result = await invoker.execute(command);
 
-    if (!task) {
-      return NextResponse.json(
-        { error: "タスクが見つかりません" },
-        { status: 404 }
-      );
+    if (!result.success) {
+      return ResponseFactory.notFound(result.error);
     }
 
-    return NextResponse.json(task);
+    return ResponseFactory.success(result.data);
   } catch {
-    return NextResponse.json(
-      { error: "タスクの取得に失敗しました" },
-      { status: 500 }
-    );
+    return ResponseFactory.error("タスクの取得に失敗しました");
   }
 }
 
@@ -40,62 +54,42 @@ export async function PUT(request: Request, { params }: { params: Params }) {
     const { id } = await params;
     const taskId = parseInt(id, 10);
 
-    if (isNaN(taskId)) {
-      return NextResponse.json(
-        { error: "無効なタスクIDです" },
-        { status: 400 }
-      );
+    // ID バリデーション
+    const idValidationResult = TaskValidators.validateTaskId(taskId);
+    if (!idValidationResult.isValid) {
+      return ResponseFactory.badRequest(idValidationResult.error || "無効なタスクIDです");
     }
 
     const body = await request.json();
     const { title, description } = body;
 
-    if (!title || typeof title !== "string") {
-      return NextResponse.json(
-        { error: "タイトルは必須です" },
-        { status: 400 }
-      );
+    // 入力バリデーション
+    const validationResult = TaskValidators.validateTaskInput(title, description);
+    if (!validationResult.isValid) {
+      return ResponseFactory.badRequest(validationResult.error || "バリデーションエラー");
     }
 
-    if (title.length > 100) {
-      return NextResponse.json(
-        { error: "タイトルは100文字以内で入力してください" },
-        { status: 400 }
-      );
-    }
-
-    if (description && description.length > 500) {
-      return NextResponse.json(
-        { error: "説明は500文字以内で入力してください" },
-        { status: 400 }
-      );
-    }
-
-    const existingTask = await prisma.task.findUnique({
-      where: { id: taskId },
-    });
-
-    if (!existingTask) {
-      return NextResponse.json(
-        { error: "タスクが見つかりません" },
-        { status: 404 }
-      );
-    }
-
-    const task = await prisma.task.update({
-      where: { id: taskId },
-      data: {
-        title: title.trim(),
-        description: description?.trim() || null,
-      },
-    });
-
-    return NextResponse.json(task);
-  } catch {
-    return NextResponse.json(
-      { error: "タスクの更新に失敗しました" },
-      { status: 500 }
+    // Command Pattern: タスク更新コマンド
+    const command = new UpdateTaskCommand(
+      repository,
+      taskId,
+      title,
+      description,
+      (t, d) => TaskValidators.validateTaskInput(t, d)
     );
+
+    const result = await invoker.execute(command);
+
+    if (!result.success) {
+      if (result.error === "タスクが見つかりません") {
+        return ResponseFactory.notFound(result.error);
+      }
+      return ResponseFactory.error(result.error || "タスクの更新に失敗しました");
+    }
+
+    return ResponseFactory.success(result.data);
+  } catch {
+    return ResponseFactory.error("タスクの更新に失敗しました");
   }
 }
 
@@ -104,33 +98,25 @@ export async function DELETE(request: Request, { params }: { params: Params }) {
     const { id } = await params;
     const taskId = parseInt(id, 10);
 
-    if (isNaN(taskId)) {
-      return NextResponse.json(
-        { error: "無効なタスクIDです" },
-        { status: 400 }
-      );
+    // バリデーション
+    const validationResult = TaskValidators.validateTaskId(taskId);
+    if (!validationResult.isValid) {
+      return ResponseFactory.badRequest(validationResult.error || "無効なタスクIDです");
     }
 
-    const existingTask = await prisma.task.findUnique({
-      where: { id: taskId },
-    });
+    // Command Pattern: タスク削除コマンド
+    const command = new DeleteTaskCommand(repository, taskId);
+    const result = await invoker.execute(command);
 
-    if (!existingTask) {
-      return NextResponse.json(
-        { error: "タスクが見つかりません" },
-        { status: 404 }
-      );
+    if (!result.success) {
+      if (result.error === "タスクが見つかりません") {
+        return ResponseFactory.notFound(result.error);
+      }
+      return ResponseFactory.error(result.error || "タスクの削除に失敗しました");
     }
 
-    await prisma.task.delete({
-      where: { id: taskId },
-    });
-
-    return NextResponse.json({ message: "タスクを削除しました" });
+    return ResponseFactory.success(result.data);
   } catch {
-    return NextResponse.json(
-      { error: "タスクの削除に失敗しました" },
-      { status: 500 }
-    );
+    return ResponseFactory.error("タスクの削除に失敗しました");
   }
 }

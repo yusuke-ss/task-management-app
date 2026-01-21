@@ -1,17 +1,38 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { getTaskRepository } from "@/lib/patterns/repository/TaskRepository";
+import {
+  GetAllTasksCommand,
+  CreateTaskCommand,
+  CommandInvoker,
+} from "@/lib/patterns/command/TaskCommands";
+import { TaskValidators } from "@/lib/patterns/helpers/TaskValidators";
+import { ResponseFactory } from "@/lib/patterns/decorator/ResponseDecorator";
+
+/**
+ * タスク一覧取得・作成API
+ * GoFデザインパターンを適用:
+ * - Repository Pattern: データアクセスの抽象化
+ * - Command Pattern: 操作のカプセル化
+ * - Singleton Pattern: リポジトリとインボーカーの管理
+ * - Factory Pattern: レスポンス生成
+ * - Chain of Responsibility: バリデーションチェーン
+ */
+
+const repository = getTaskRepository();
+const invoker = new CommandInvoker();
 
 export async function GET() {
   try {
-    const tasks = await prisma.task.findMany({
-      orderBy: { sortOrder: "asc" },
-    });
-    return NextResponse.json(tasks);
+    const command = new GetAllTasksCommand(repository);
+    const result = await invoker.execute(command);
+
+    if (!result.success) {
+      return ResponseFactory.error(result.error || "タスクの取得に失敗しました");
+    }
+
+    return ResponseFactory.success(result.data);
   } catch {
-    return NextResponse.json(
-      { error: "タスクの取得に失敗しました" },
-      { status: 500 }
-    );
+    return ResponseFactory.error("タスクの取得に失敗しました");
   }
 }
 
@@ -20,45 +41,29 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { title, description } = body;
 
-    if (!title || typeof title !== "string") {
-      return NextResponse.json(
-        { error: "タイトルは必須です" },
-        { status: 400 }
-      );
+    // Chain of Responsibility Pattern: バリデーションチェーン
+    const validationResult = TaskValidators.validateTaskInput(title, description);
+    if (!validationResult.isValid) {
+      return ResponseFactory.badRequest(validationResult.error || "バリデーションエラー");
     }
 
-    if (title.length > 100) {
-      return NextResponse.json(
-        { error: "タイトルは100文字以内で入力してください" },
-        { status: 400 }
-      );
-    }
-
-    if (description && description.length > 500) {
-      return NextResponse.json(
-        { error: "説明は500文字以内で入力してください" },
-        { status: 400 }
-      );
-    }
-
-    // 既存のタスクのsortOrderをすべてインクリメント
-    await prisma.task.updateMany({
-      data: { sortOrder: { increment: 1 } },
-    });
-
-    const task = await prisma.task.create({
-      data: {
-        title: title.trim(),
-        description: description?.trim() || null,
-        sortOrder: 0,
-      },
-    });
-
-    return NextResponse.json(task, { status: 201 });
-  } catch {
-    return NextResponse.json(
-      { error: "タスクの作成に失敗しました" },
-      { status: 500 }
+    // Command Pattern: タスク作成コマンド
+    const command = new CreateTaskCommand(
+      repository,
+      title,
+      description,
+      (t, d) => TaskValidators.validateTaskInput(t, d)
     );
+
+    const result = await invoker.execute(command);
+
+    if (!result.success) {
+      return ResponseFactory.error(result.error || "タスクの作成に失敗しました");
+    }
+
+    // Factory Pattern + Decorator Pattern: レスポンス生成
+    return ResponseFactory.created(result.data);
+  } catch {
+    return ResponseFactory.error("タスクの作成に失敗しました");
   }
 }

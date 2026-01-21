@@ -1,43 +1,50 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { getTaskRepository } from "@/lib/patterns/repository/TaskRepository";
+import {
+  ToggleTaskCommand,
+  CommandInvoker,
+} from "@/lib/patterns/command/TaskCommands";
+import { TaskValidators } from "@/lib/patterns/helpers/TaskValidators";
+import { ResponseFactory } from "@/lib/patterns/decorator/ResponseDecorator";
+
+/**
+ * タスク完了状態トグルAPI
+ * GoFデザインパターンを適用:
+ * - Repository Pattern: データアクセスの抽象化
+ * - Command Pattern: 操作のカプセル化
+ * - Singleton Pattern: リポジトリとインボーカーの管理
+ * - Factory Pattern: レスポンス生成
+ */
 
 type Params = Promise<{ id: string }>;
+
+const repository = getTaskRepository();
+const invoker = new CommandInvoker();
 
 export async function PATCH(request: Request, { params }: { params: Params }) {
   try {
     const { id } = await params;
     const taskId = parseInt(id, 10);
 
-    if (isNaN(taskId)) {
-      return NextResponse.json(
-        { error: "無効なタスクIDです" },
-        { status: 400 }
-      );
+    // バリデーション
+    const validationResult = TaskValidators.validateTaskId(taskId);
+    if (!validationResult.isValid) {
+      return ResponseFactory.badRequest(validationResult.error || "無効なタスクIDです");
     }
 
-    const existingTask = await prisma.task.findUnique({
-      where: { id: taskId },
-    });
+    // Command Pattern: タスクトグルコマンド
+    const command = new ToggleTaskCommand(repository, taskId);
+    const result = await invoker.execute(command);
 
-    if (!existingTask) {
-      return NextResponse.json(
-        { error: "タスクが見つかりません" },
-        { status: 404 }
-      );
+    if (!result.success) {
+      if (result.error === "Task not found") {
+        return ResponseFactory.notFound("タスクが見つかりません");
+      }
+      return ResponseFactory.error(result.error || "タスクの状態変更に失敗しました");
     }
 
-    const task = await prisma.task.update({
-      where: { id: taskId },
-      data: {
-        isCompleted: !existingTask.isCompleted,
-      },
-    });
-
-    return NextResponse.json(task);
+    return ResponseFactory.success(result.data);
   } catch {
-    return NextResponse.json(
-      { error: "タスクの状態変更に失敗しました" },
-      { status: 500 }
-    );
+    return ResponseFactory.error("タスクの状態変更に失敗しました");
   }
 }
